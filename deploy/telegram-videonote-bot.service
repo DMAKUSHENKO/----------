@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram VideoNote Bot
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/telegram-videonote-bot
+ExecStart=/opt/telegram-videonote-bot/venv/bin/python -m app.main
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/telegram-videonote-bot/.env
+Restart=always
+RestartSec=5
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+
+

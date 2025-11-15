@@ -4,8 +4,8 @@ import shutil
 import subprocess
 from pathlib import Path
 import json
-from typing import List, Optional
 import os
+from typing import List, Optional
 
 
 def ensure_ffmpeg_available() -> None:
@@ -30,20 +30,16 @@ def build_ffmpeg_command(
     audio_codec: str = "copy",
     source_colors: dict | None = None,
     auto_colorspace: bool = False,
-    tune: str | None = "film",
+    tune: str | None = None,
     apply_color_tags: bool = False,
     scale_flags: str = "lanczos+accurate_rnd+full_chroma_int",
     compat_video_note: bool = True,
-    enhance_saturation: bool = True,
-    saturation: float = 1.18,
-    contrast: float = 1.03,
+    enhance_saturation: bool = False,
+    saturation: float = 1.0,
+    contrast: float = 1.0,
     brightness: float = 0.0,
     gamma: float = 1.0,
-    force_limited_range: bool = True,
-    audio_bitrate_k: Optional[int] = None,
-    maxrate_k: Optional[int] = None,
-    bufsize_k: Optional[int] = None,
-    fps: Optional[int] = None,
+    force_limited_range: bool = False,
 ) -> List[str]:
     """Строит команду ffmpeg для конвертации видео в квадратный формат.
     
@@ -73,12 +69,30 @@ def build_ffmpeg_command(
         заменить ('-c:v', 'libx264', '-crf', str(crf), '-preset', preset)
         на ('-c:v', 'h264_videotoolbox', '-b:v', '2.5M') — будет быстрее, но CRF не применяется.
     """
-    # Кроп → масштаб (lanczos) → выравнивание SAR
-    vf_chain = [
-        f"crop='min(in_w,in_h)':'min(in_w,in_h)'",
+    # Кроп → (опционально HDR→SDR) → масштаб → setsar → диапазон → формат пикселей
+    vf_chain = [f"crop='min(in_w,in_h)':'min(in_w,in_h)'"]
+    prim = (source_colors.get("color_primaries") or "").lower() if source_colors else ""
+    trc = (source_colors.get("color_transfer") or "").lower() if source_colors else ""
+    mtx = (source_colors.get("color_space") or "").lower() if source_colors else ""
+    is_hdr = trc in ("arib-std-b67", "smpte2084") or "2020" in prim or "2020" in mtx
+    # Для HDR (HLG/PQ, BT.2020) используем тонемаппинг в SDR BT.709 перед масштабированием
+    if is_hdr:
+        prim_in = "bt2020" if "2020" in prim else (prim or "bt709")
+        mtx_in = "bt2020nc" if "2020" in mtx else (mtx or "bt709")
+        trc_in = trc or "arib-std-b67"
+        vf_chain += [
+            f"zscale=transferin={trc_in}:primariesin={prim_in}:matrixin={mtx_in}",
+            "tonemap=hable:param=0.5:desat=0",
+            "zscale=transfer=bt709:primaries=bt709:matrix=bt709:range=tv",
+        ]
+    vf_chain += [
         f"scale={size}:{size}:flags={scale_flags}",
         "setsar=1",
     ]
+    # Приводим к ограниченному диапазону (TV), который ожидают мобильные клиенты (для не-HDR пути)
+    if force_limited_range and not is_hdr:
+        # colorspace фактически конвертирует значения в TV range и bt709
+        vf_chain.append("colorspace=all=bt709:range=tv:fast=1")
     # Лёгкое «подкручивание» насыщенности/контраста для более сочной картинки на мобильных
     # Используем eq, чтобы не менять оттенок (hue) и не «пережигать» светлые области
     if enhance_saturation:
@@ -104,8 +118,6 @@ def build_ffmpeg_command(
         "-vf", scale_crop,
         "-movflags", "+faststart",
     ]
-    if fps:
-        cmd += ["-r", str(fps)]
     if use_hwaccel:
         # Аппаратное кодирование (пример для macOS). Обычно быстрее, но контроль качества иной.
         cmd += [
@@ -153,12 +165,7 @@ def build_ffmpeg_command(
     if audio_codec == "copy":
         cmd += ["-c:a", "copy"]
     else:
-        a_bitrate = f"{(audio_bitrate_k or 192)}k"
-        cmd += ["-c:a", "aac", "-b:a", a_bitrate]
-    if maxrate_k:
-        cmd += ["-maxrate", f"{maxrate_k}k"]
-    if bufsize_k:
-        cmd += ["-bufsize", f"{bufsize_k}k"]
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
     cmd += [str(output_path)]
     return cmd
 
@@ -206,6 +213,12 @@ def convert_to_square_video_note(
     """
     ensure_ffmpeg_available()
     source_colors = probe_source_colorspace(input_path)
+    # Опциональная «подкрутка» цвета из .env (по умолчанию выключена)
+    enhance = os.getenv("ENHANCE_SAT", "0").lower() in ("1", "true", "yes", "on")
+    sat = float(os.getenv("VIDEO_NOTE_SAT", "1.12"))
+    con = float(os.getenv("VIDEO_NOTE_CONTRAST", "1.02"))
+    bri = float(os.getenv("VIDEO_NOTE_BRIGHTNESS", "0.0"))
+    gam = float(os.getenv("VIDEO_NOTE_GAMMA", "1.0"))
     # 1-я попытка: копировать аудио для максимального качества/скорости
     cmd = build_ffmpeg_command(
         input_path=input_path,
@@ -218,8 +231,21 @@ def convert_to_square_video_note(
         auto_colorspace=False,  # отключаем автоматическую конверсию цветов для совместимости
         audio_codec="copy",
         compat_video_note=True,
+        enhance_saturation=enhance,
+        saturation=sat,
+        contrast=con,
+        brightness=bri,
+        gamma=gam,
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Таймаут FFmpeg из .env (по умолчанию 600 сек)
+    try:
+        ffmpeg_timeout_s = int(os.getenv("FFMPEG_TIMEOUT_SECONDS", "600"))
+    except Exception:
+        ffmpeg_timeout_s = 600
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=ffmpeg_timeout_s)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Обработка видео превысила лимит времени {ffmpeg_timeout_s} сек и была прервана.")
     if proc.returncode != 0:
         # Если копирование звука несовместимо с mp4 (например, opus), то повторим с AAC
         cmd_fallback = build_ffmpeg_command(
@@ -233,83 +259,78 @@ def convert_to_square_video_note(
             auto_colorspace=False,
             audio_codec="aac",
             compat_video_note=True,
+            enhance_saturation=enhance,
+            saturation=sat,
+            contrast=con,
+            brightness=bri,
+            gamma=gam,
         )
-        proc2 = subprocess.run(cmd_fallback, capture_output=True, text=True)
+        try:
+            proc2 = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=ffmpeg_timeout_s)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Обработка видео (fallback) превысила лимит времени {ffmpeg_timeout_s} сек и была прервана.")
         if proc2.returncode != 0:
             raise RuntimeError(f"FFmpeg ошибка:\n{proc2.stderr.strip()}")
-    # Проверка размера и при необходимости даунскейл битрейта
+
+    # Гарантируем укладывание в лимит размера для video note
+    limit_mb_env = os.getenv("TELEGRAM_VIDEONOTE_LIMIT_MB", "").strip()
     try:
-        file_size = output_path.stat().st_size
+        size_limit_mb = float(limit_mb_env) if limit_mb_env else 12.0
+    except Exception:
+        size_limit_mb = 12.0
+    size_limit_bytes = int(size_limit_mb * 1024 * 1024)
+    try:
+        out_size = output_path.stat().st_size
     except FileNotFoundError:
-        file_size = 0
-    # Лимит: можно переопределить переменной окружения TELEGRAM_VIDEONOTE_LIMIT_MB (по умолчанию 20 МБ)
-    limit_mb = float(os.getenv("TELEGRAM_VIDEONOTE_LIMIT_MB", "20"))
-    limit_bytes = int(limit_mb * 1024 * 1024)
-    if file_size > limit_bytes:
-        # Повторная перекодировка с расчётом целевого битрейта по длительности
-        tmp_path = output_path.with_suffix(".tmp.mp4")
-        # Получаем длительность (сек)
-        duration_sec = _probe_duration_seconds(output_path) or _probe_duration_seconds(input_path) or 0.0
-        # Резерв под заголовки/служебное: берём 95% лимита
-        target_bits = int(limit_bytes * 8 * 0.95)
-        audio_k = int(os.getenv("TELEGRAM_VN_AUDIO_K", "96"))
-        # Если длительность неизвестна — используем консервативные ограничения
-        if duration_sec <= 0:
-            v_k = int(os.getenv("TELEGRAM_VN_MAXRATE_K", "1800"))
-            cmd_reduce = build_ffmpeg_command(
-                input_path=input_path,
-                output_path=tmp_path,
-                size=size,
-                use_hwaccel=use_hwaccel,
-                crf=max(crf, 22),
-                preset="medium",
-                source_colors=source_colors,
-                auto_colorspace=False,
-                audio_codec="aac",
-                compat_video_note=True,
-                audio_bitrate_k=audio_k,
-                maxrate_k=v_k,
-                bufsize_k=v_k * 2,
-                fps=24,
-            )
+        out_size = 0
+    if out_size > size_limit_bytes:
+        # Перекодируем с расчётом целевого битрейта
+        duration = _probe_duration_seconds(output_path) or _probe_duration_seconds(input_path) or 0.0
+        # Резерв 95% лимита под полезные данные
+        target_bits_total = int(size_limit_bytes * 8 * 0.95)
+        audio_k = 96
+        if duration > 0:
+            v_k = max(300, int(target_bits_total / duration / 1000) - audio_k)
         else:
-            # Целевой видеобитрейт (кбит/с) = (target_bits/сек)/1000 - аудио
-            v_k = max(300, int(target_bits / duration_sec / 1000) - audio_k)
-            cmd_reduce = build_ffmpeg_command(
-                input_path=input_path,
-                output_path=tmp_path,
-                size=size,
-                use_hwaccel=use_hwaccel,
-                crf=max(crf, 22),
-                preset="medium",
-                source_colors=source_colors,
-                auto_colorspace=False,
-                audio_codec="aac",
-                compat_video_note=True,
-                audio_bitrate_k=audio_k,
-                maxrate_k=v_k,
-                bufsize_k=v_k * 2,
-                fps=24,
-            )
-        proc3 = subprocess.run(cmd_reduce, capture_output=True, text=True)
-        if proc3.returncode != 0:
-            raise RuntimeError(f"FFmpeg ошибка (reencode):\n{proc3.stderr.strip()}")
-        # Заменяем исходник новым, если он меньше лимита или хотя бы получился
+            v_k = 1800
+        tmp_path = output_path.with_suffix(".sizefix.mp4")
+        cmd_reduce = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", str(output_path),
+            "-r", "24",
+            "-c:v", "libx264",
+            "-profile:v", "baseline",
+            "-level", "3.1",
+            "-preset", "medium",
+            "-crf", str(max(crf, 22)),
+            "-maxrate", f"{v_k}k",
+            "-bufsize", f"{v_k * 2}k",
+            "-movflags", "+faststart",
+            "-c:a", "aac",
+            "-b:a", f"{audio_k}k",
+            str(tmp_path),
+        ]
         try:
-            if tmp_path.stat().st_size < output_path.stat().st_size:
-                output_path.unlink(missing_ok=True)
-                tmp_path.rename(output_path)
-            else:
-                tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            proc3 = subprocess.run(cmd_reduce, capture_output=True, text=True, timeout=ffmpeg_timeout_s)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Обработка видео (size-fix) превысила лимит времени {ffmpeg_timeout_s} сек и была прервана.")
+        if proc3.returncode != 0:
+            raise RuntimeError(f"FFmpeg ошибка (size-fix):\n{proc3.stderr.strip()}")
+        # Заменяем файл результатом перекодирования
+        output_path.unlink(missing_ok=True)
+        tmp_path.rename(output_path)
 
 def _probe_duration_seconds(path: Path) -> Optional[float]:
-    """Возвращает длительность файла в секундах через ffprobe, либо None при ошибке."""
+    """Возвращает длительность файла в секундах через ffprobe, либо None при ошибке.
+    
+    Используется для документов (video как файл), где Telegram не указывает duration.
+    """
     cmd = [
         "ffprobe",
         "-v", "error",
-        "-select_streams", "v:0",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(path),
@@ -320,5 +341,4 @@ def _probe_duration_seconds(path: Path) -> Optional[float]:
         return float(s) if s else None
     except Exception:
         return None
-
 

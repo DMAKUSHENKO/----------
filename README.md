@@ -30,6 +30,36 @@ echo "BOT_TOKEN=ваш_токен" > .env
 python -m app.main
 ```
 
+### Лимиты и защита
+- Размер входного видео: по умолчанию 20 МБ (`USER_VIDEO_MAX_MB`).
+- Лимит длительности: по умолчанию 90 сек (`MAX_VIDEO_DURATION_SECONDS`).
+- Таймаут FFmpeg: по умолчанию 600 сек (`FFMPEG_TIMEOUT_SECONDS`).
+- Параллелизм: не более 2 одновременных задач (`MAX_CONCURRENCY`).
+- Пер-юзер rate limit: 20 сек между задачами (`USER_RATE_LIMIT_SECONDS`).
+
+Все значения настраиваются через `.env`.
+
+### Деплой 24/7
+Вариант Docker:
+```bash
+docker build -t tg-videonote-bot .
+docker run -d --name tg-videonote-bot --restart=always \
+  -e BOT_TOKEN=ваш_токен \
+  --env-file .env \
+  tg-videonote-bot
+```
+
+Вариант systemd:
+1) Скопируйте проект на сервер, создайте `venv`, установите зависимости, создайте `.env`
+2) Скопируйте `deploy/telegram-videonote-bot.service` в `/etc/systemd/system/`
+3) Активируйте:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-videonote-bot
+sudo systemctl start telegram-videonote-bot
+sudo systemctl status telegram-videonote-bot
+```
+
 ### Как это работает
 - Бот принимает видео/видео-заметки/видео-документы
 - Скачивает файл через Telegram API
