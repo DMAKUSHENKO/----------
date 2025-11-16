@@ -289,11 +289,11 @@ async def _process_and_reply_with_video_note(
         # Блокируем пользователя на период rate-limit (по умолчанию 20 сек)
         _user_busy_until[user_id] = now + _per_user_limit_s
 
-    # Лимит длительности (по умолчанию 90 сек, можно переопределить MAX_VIDEO_DURATION_SECONDS)
+    # Лимит длительности (по умолчанию 60 сек, можно переопределить MAX_VIDEO_DURATION_SECONDS)
     try:
-        max_duration_s = int(os.getenv("MAX_VIDEO_DURATION_SECONDS", "90"))
+        max_duration_s = int(os.getenv("MAX_VIDEO_DURATION_SECONDS", "60"))
     except Exception:
-        max_duration_s = 90
+        max_duration_s = 60
     duration = None
     if message.video and message.video.duration:
         duration = int(message.video.duration)
@@ -363,7 +363,14 @@ async def _process_and_reply_with_video_note(
                         # Некоторые чаты запрещают голосовые/видео-сообщения (video notes)
                         # В таком случае отправим результат как обычное видео/документ
                         err_text = (str(send_err) or "").lower()
-                        if (
+                        # Если причина — превышение лимита длительности кружка — объясним, без фолбэка в видео
+                        if "too long" in err_text or "longer than" in err_text or "video_note" in err_text and "long" in err_text:
+                            await message.answer(
+                                f"Кружки в Telegram ограничены {max_duration_s} сек. "
+                                "Сократите ролик и отправьте снова, чтобы получить кружок."
+                            )
+                            sent_as_note = False
+                        elif (
                             "forbidden" in err_text and ("voice" in err_text or "video" in err_text)
                         ) or "voice messages forbidden" in err_text or "video messages forbidden" in err_text:
                             sent_as_note = False
