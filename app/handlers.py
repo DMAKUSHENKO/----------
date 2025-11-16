@@ -11,6 +11,7 @@ from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
+from aiogram.exceptions import TelegramBadRequest
 
 from .ffmpeg_utils import convert_to_square_video_note, _probe_duration_seconds
 from .analytics import (
@@ -336,11 +337,25 @@ async def _process_and_reply_with_video_note(
                 # 3) Отправка как video_note (явным методом Bot API) + сообщение
                 await message.answer("А вот как и обещал кружочек в хорошем качестве")
                 video_note = FSInputFile(out_path)
-                await message.bot.send_video_note(
-                    chat_id=message.chat.id,
-                    video_note=video_note,
-                    length=size,
-                )
+                try:
+                    await message.bot.send_video_note(
+                        chat_id=message.chat.id,
+                        video_note=video_note,
+                        length=size,
+                    )
+                except TelegramBadRequest as send_err:
+                    # Некоторые чаты (или права пользователя) запрещают голосовые/видеосообщения
+                    # В таком случае отправим результат как обычное видео
+                    err_text = (str(send_err) or "").lower()
+                    if "voice messages forbidden" in err_text or "video messages forbidden" in err_text or "messages forbidden" in err_text:
+                        await message.answer("В этом чате запрещены «кружки». Отправляю как обычное видео.")
+                        await message.bot.send_video(
+                            chat_id=message.chat.id,
+                            video=FSInputFile(out_path),
+                            caption="Готово ✅",
+                        )
+                    else:
+                        raise
                 # Аналитика: успешная конвертация
                 if message.from_user:
                     record_conversion(message.from_user.id)
