@@ -11,7 +11,7 @@ from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramAPIError
 
 from .ffmpeg_utils import convert_to_square_video_note, _probe_duration_seconds
 from .analytics import (
@@ -302,7 +302,8 @@ async def _process_and_reply_with_video_note(
     # Для документов длительность неизвестна заранее — проверим после скачивания (ниже)
 
     # Параллелизм: не более N одновременных конвертаций
-    async with _semaphore, ChatActionSender.upload_video_note(chat_id=message.chat.id, bot=message.bot):
+    # Используем upload_video (а не upload_video_note), чтобы не падать на чатах, где запрещены кружки
+    async with _semaphore, ChatActionSender.upload_video(chat_id=message.chat.id, bot=message.bot):
         try:
             # Сообщение пользователю о начале обработки
             t0 = time.time()
@@ -334,28 +335,61 @@ async def _process_and_reply_with_video_note(
                     14,                # CRF ниже — выше качество (увеличит размер файла)
                     "slow",            # preset для лучшего качества/компрессии
                 )
-                # 3) Отправка как video_note (явным методом Bot API) + сообщение
+                # 3) Отправка как video_note (явным методом Bot API) + сообщение с фолбэком
                 await message.answer("А вот как и обещал кружочек в хорошем качестве")
-                video_note = FSInputFile(out_path)
+                # Проверим разрешения чата на отправку video_note, если доступны
+                can_send_vn = True
                 try:
-                    await message.bot.send_video_note(
-                        chat_id=message.chat.id,
-                        video_note=video_note,
-                        length=size,
-                    )
-                except TelegramBadRequest as send_err:
-                    # Некоторые чаты (или права пользователя) запрещают голосовые/видеосообщения
-                    # В таком случае отправим результат как обычное видео
-                    err_text = (str(send_err) or "").lower()
-                    if "voice messages forbidden" in err_text or "video messages forbidden" in err_text or "messages forbidden" in err_text:
-                        await message.answer("В этом чате запрещены «кружки». Отправляю как обычное видео.")
+                    chat_info = await message.bot.get_chat(message.chat.id)
+                    perms = getattr(chat_info, "permissions", None)
+                    if perms is not None:
+                        allowed = getattr(perms, "can_send_video_notes", None)
+                        if allowed is False:
+                            can_send_vn = False
+                except Exception:
+                    # Если не удалось получить инфо о чате, просто попробуем отправить и обработаем ошибку
+                    pass
+                video_note = FSInputFile(out_path)
+                sent_as_note = False
+                if can_send_vn:
+                    try:
+                        await message.bot.send_video_note(
+                            chat_id=message.chat.id,
+                            video_note=video_note,
+                            length=size,
+                        )
+                        sent_as_note = True
+                    except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as send_err:
+                        # Некоторые чаты запрещают голосовые/видео-сообщения (video notes)
+                        # В таком случае отправим результат как обычное видео/документ
+                        err_text = (str(send_err) or "").lower()
+                        if (
+                            "forbidden" in err_text and ("voice" in err_text or "video" in err_text)
+                        ) or "voice messages forbidden" in err_text or "video messages forbidden" in err_text:
+                            sent_as_note = False
+                        else:
+                            # Если ошибка иная — попробуем всё равно фолбэк как видео
+                            sent_as_note = False
+                if not sent_as_note:
+                    # Фолбэк: отправляем как обычное видео; если и это запрещено — как документ
+                    try:
                         await message.bot.send_video(
                             chat_id=message.chat.id,
                             video=FSInputFile(out_path),
                             caption="Готово ✅",
                         )
-                    else:
-                        raise
+                    except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as send_video_err:
+                        err2 = (str(send_video_err) or "").lower()
+                        if "forbidden" in err2 and "video" in err2:
+                            await message.answer("В этом чате запрещены видео. Отправляю как файл.")
+                            await message.bot.send_document(
+                                chat_id=message.chat.id,
+                                document=FSInputFile(out_path),
+                                caption="Готово ✅",
+                            )
+                        else:
+                            # Если какая-то иная ошибка — пробросим выше
+                            raise
                 # Аналитика: успешная конвертация
                 if message.from_user:
                     record_conversion(message.from_user.id)
