@@ -351,6 +351,7 @@ async def _process_and_reply_with_video_note(
                     pass
                 video_note = FSInputFile(out_path)
                 sent_as_note = False
+                fallback_reason_forbidden = False
                 if can_send_vn:
                     try:
                         await message.bot.send_video_note(
@@ -374,11 +375,21 @@ async def _process_and_reply_with_video_note(
                             "forbidden" in err_text and ("voice" in err_text or "video" in err_text)
                         ) or "voice messages forbidden" in err_text or "video messages forbidden" in err_text:
                             sent_as_note = False
+                            fallback_reason_forbidden = True
                         else:
                             # Если ошибка иная — попробуем всё равно фолбэк как видео
                             sent_as_note = False
                 if not sent_as_note:
                     # Фолбэк: отправляем как обычное видео; если и это запрещено — как документ
+                    # Подсказка пользователю: почему пришло квадратное видео вместо «кружка»
+                    if (not can_send_vn) or fallback_reason_forbidden:
+                        await message.answer(
+                            "Похоже, что «кружки» (голосовые/видеосообщения) запрещены "
+                            "в этом чате или в ваших настройках приватности. "
+                            "Поэтому отправляю квадратное видео.\n\n"
+                            "Если хотите получать именно кружок — включите разрешение на "
+                            "голосовые/видеосообщения в настройках чата/приватности и отправьте видео снова."
+                        )
                     try:
                         await message.bot.send_video(
                             chat_id=message.chat.id,
