@@ -81,7 +81,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я могу превратить твои красивые видео в «кружки» хорошего качества.\n\n"
         "Как мной пользоваться:\n"
         "1) Можно загружать видео как медиа или как файл (документ).\n"
-        "2) Ограничение размера — до 20 МБ.\n"
+        "2) Можно отправлять большие видео — если Telegram позволит, я обработаю.\n"
         "3) Кадрировать видео до квадрата не нужно — я сделаю это сам автоматически.\n\n"
         "Просто пришли видео — и я верну его красивым кружочком."
     )
@@ -249,11 +249,11 @@ async def _process_and_reply_with_video_note(
         return
     _processed_messages[key] = now
 
-    # Пользовательский лимит входного файла (20 МБ по умолчанию; 0 или <0 — отключить проверку)
+    # Пользовательский лимит входного файла (по умолчанию выключено; задаётся USER_VIDEO_MAX_MB; 0 или <0 — отключить проверку)
     try:
-        user_limit_mb = float(os.getenv("USER_VIDEO_MAX_MB", "20"))
+        user_limit_mb = float(os.getenv("USER_VIDEO_MAX_MB", "0"))
     except Exception:
-        user_limit_mb = 20.0
+        user_limit_mb = 0.0
     enforce_user_limit = user_limit_mb > 0
     user_limit_bytes = int(max(user_limit_mb, 0) * 1024 * 1024)
 
@@ -476,6 +476,6 @@ async def handle_non_video(message: Message) -> None:
         return
     await message.answer(
         "Это не видео братик, возможно промахнулся когда жмякал на экран\n"
-         "Пришлите видео как медиа или как файл до 20 МБ."
+         "Пришлите видео как медиа или как файл."
     )
 
