@@ -275,9 +275,13 @@ def convert_to_square_video_note(
     # Гарантируем укладывание в лимит размера для video note
     limit_mb_env = os.getenv("TELEGRAM_VIDEONOTE_LIMIT_MB", "").strip()
     try:
+        # 0 или отрицательное значение — отключает контроль размера
         size_limit_mb = float(limit_mb_env) if limit_mb_env else 12.0
     except Exception:
         size_limit_mb = 12.0
+    if size_limit_mb <= 0:
+        # Без ограничения: не трогаем результат, отправляем как есть
+        return
     size_limit_bytes = int(size_limit_mb * 1024 * 1024)
     try:
         out_size = output_path.stat().st_size

@@ -19,7 +19,7 @@ async def main() -> None:
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()
     dp.include_router(media_router)
-    # Описание и команды бота (для раздела About в Telegram)
+
     try:
         await bot.set_my_description(
             "Бот-конвертер: превращает ваши видео в «кружки» хорошего качества. "
@@ -28,7 +28,7 @@ async def main() -> None:
         await bot.set_my_short_description("Конвертирует видео в «кружки»")
         await bot.set_my_commands([BotCommand(command="start", description="Инструкция и начало работы")])
     except Exception:
-        # Игнорируем ошибки установки описания, чтобы не мешать запуску
+        
         pass
     await dp.start_polling(bot)
 

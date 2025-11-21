@@ -249,12 +249,13 @@ async def _process_and_reply_with_video_note(
         return
     _processed_messages[key] = now
 
-    # Пользовательский лимит входного файла (20 МБ по умолчанию, можно переопределить USER_VIDEO_MAX_MB)
+    # Пользовательский лимит входного файла (20 МБ по умолчанию; 0 или <0 — отключить проверку)
     try:
         user_limit_mb = float(os.getenv("USER_VIDEO_MAX_MB", "20"))
     except Exception:
         user_limit_mb = 20.0
-    user_limit_bytes = int(user_limit_mb * 1024 * 1024)
+    enforce_user_limit = user_limit_mb > 0
+    user_limit_bytes = int(max(user_limit_mb, 0) * 1024 * 1024)
 
     # Проверяем размер до скачивания
     media_size = None
@@ -265,7 +266,7 @@ async def _process_and_reply_with_video_note(
     elif message.document and message.document.file_size:
         media_size = int(message.document.file_size)
 
-    if media_size and media_size > user_limit_bytes:
+    if enforce_user_limit and media_size and media_size > user_limit_bytes:
         if message.from_user:
             record_error(message.from_user.id, "size_limit")
         await message.answer(
